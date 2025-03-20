@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from sklearn.datasets import fetch_california_housing
-from sklearn.model_selection import train_test_split, KFold
+from sklearn.model_selection import train_test_split, KFold, cross_val_score
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures, PowerTransformer
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
@@ -16,7 +16,7 @@ from optuna import create_study, Trial
 from optuna.samplers import TPESampler
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, LeakyReLU
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 import matplotlib.pyplot as plt
@@ -65,13 +65,33 @@ def objective(trial: Trial):
         "max_depth": trial.suggest_int("lgbm_max_depth", 3, 10),
     }
     
+    # Гиперпараметры для CatBoost
+    catboost_params = {
+        "iterations": trial.suggest_int("catboost_iterations", 100, 300),
+        "learning_rate": trial.suggest_loguniform("catboost_learning_rate", 1e-3, 1e-1),
+        "depth": trial.suggest_int("catboost_depth", 3, 10),
+    }
+    
+    # Гиперпараметры для GradientBoostingRegressor
+    gb_params = {
+        "n_estimators": trial.suggest_int("gb_n_estimators", 100, 300),
+        "learning_rate": trial.suggest_loguniform("gb_learning_rate", 1e-3, 1e-1),
+        "max_depth": trial.suggest_int("gb_max_depth", 3, 10),
+    }
+    
+    # Гиперпараметры для RandomForestRegressor
+    rf_params = {
+        "n_estimators": trial.suggest_int("rf_n_estimators", 100, 300),
+        "max_depth": trial.suggest_int("rf_max_depth", 3, 10),
+    }
+    
     # Создание моделей
     models = [
         XGBRegressor(**xgb_params),
         LGBMRegressor(**lgbm_params),
-        CatBoostRegressor(iterations=200, learning_rate=0.05, depth=6, verbose=0, random_state=42),
-        GradientBoostingRegressor(n_estimators=200, learning_rate=0.05, max_depth=6, random_state=42),
-        RandomForestRegressor(n_estimators=200, max_depth=6, random_state=42)
+        CatBoostRegressor(**catboost_params, verbose=0, random_state=42),
+        GradientBoostingRegressor(**gb_params, random_state=42),
+        RandomForestRegressor(**rf_params, random_state=42)
     ]
     
     # Stacking ансамбль
@@ -100,9 +120,9 @@ print("Лучшие гиперпараметры:", best_params)
 models = [
     XGBRegressor(n_estimators=best_params["xgb_n_estimators"], learning_rate=best_params["xgb_learning_rate"], max_depth=best_params["xgb_max_depth"]),
     LGBMRegressor(n_estimators=best_params["lgbm_n_estimators"], learning_rate=best_params["lgbm_learning_rate"], max_depth=best_params["lgbm_max_depth"]),
-    CatBoostRegressor(iterations=200, learning_rate=0.05, depth=6, verbose=0, random_state=42),
-    GradientBoostingRegressor(n_estimators=200, learning_rate=0.05, max_depth=6, random_state=42),
-    RandomForestRegressor(n_estimators=200, max_depth=6, random_state=42)
+    CatBoostRegressor(iterations=best_params["catboost_iterations"], learning_rate=best_params["catboost_learning_rate"], depth=best_params["catboost_depth"], verbose=0, random_state=42),
+    GradientBoostingRegressor(n_estimators=best_params["gb_n_estimators"], learning_rate=best_params["gb_learning_rate"], max_depth=best_params["gb_max_depth"], random_state=42),
+    RandomForestRegressor(n_estimators=best_params["rf_n_estimators"], max_depth=best_params["rf_max_depth"], random_state=42)
 ]
 
 meta_model = Ridge(alpha=best_params["ridge_alpha"])
@@ -124,12 +144,53 @@ r2_ensemble = r2_score(y_test, y_pred_ensemble)
 print(f"Среднеквадратичная ошибка (MSE) ансамбля: {mse_ensemble:.4f}")
 print(f"Коэффициент детерминации (R²) ансамбля: {r2_ensemble:.4f}")
 
+# Создание и обучение нейронной сети
+def build_nn():
+    model = Sequential([
+        Dense(128, input_shape=(X_train.shape[1],), activation='relu'),
+        BatchNormalization(),
+        Dropout(0.2),
+        Dense(64, activation='relu'),
+        BatchNormalization(),
+        Dropout(0.2),
+        Dense(1)
+    ])
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    return model
+
+nn_model = build_nn()
+history = nn_model.fit(X_train, y_train, epochs=50, batch_size=32, validation_split=0.2, callbacks=[EarlyStopping(patience=5)])
+
+# Предсказание на тестовых данных
+y_pred_nn = nn_model.predict(X_test).flatten()
+
+# Оценка качества нейронной сети
+mse_nn = mean_squared_error(y_test, y_pred_nn)
+r2_nn = r2_score(y_test, y_pred_nn)
+
+print(f"Среднеквадратичная ошибка (MSE) нейронной сети: {mse_nn:.4f}")
+print(f"Коэффициент детерминации (R²) нейронной сети: {r2_nn:.4f}")
+
 # Визуализация результатов
-plt.figure(figsize=(8, 6))
+plt.figure(figsize=(12, 6))
+
+# Ансамбль
+plt.subplot(1, 2, 1)
 plt.scatter(y_test, y_pred_ensemble, alpha=0.7, label="Ансамбль", color='green')
 plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], color='red', linestyle='--')  # Линия идеального совпадения
 plt.xlabel("Истинные значения")
 plt.ylabel("Предсказанные значения")
 plt.title("Ансамбль")
 plt.legend()
+
+# Нейронная сеть
+plt.subplot(1, 2, 2)
+plt.scatter(y_test, y_pred_nn, alpha=0.7, label="Нейронная сеть", color='blue')
+plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], color='red', linestyle='--')  # Линия идеального совпадения
+plt.xlabel("Истинные значения")
+plt.ylabel("Предсказанные значения")
+plt.title("Нейронная сеть")
+plt.legend()
+
+plt.tight_layout()
 plt.show()
